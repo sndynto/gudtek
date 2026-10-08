@@ -1,0 +1,15 @@
+{
+  "deployedAt": "2026-10-08T08:35:19.163Z",
+  "network": "QMS Testnet",
+  "chainId": 19480,
+  "contractAddress": "0x61EA44150A1952B26Ab1adca540E1411f9894Bb1",
+  "tokenName": "Myro",
+  "tokenSymbol": "MYRO",
+  "totalSupply": 1000000000,
+  "deployer": "0xE55d4C0b6f3d34041ac447Ef42eb8C425a714BB3",
+  "scannedBlocks": 200,
+  "recipientCount": 0,
+  "recipients": [],
+  "explorerUrl": "https://testnet.qmsscan.io/address/0x61EA44150A1952B26Ab1adca540E1411f9894Bb1",
+  "deployTxHash": "0x85be84ff938be76353c6aa069139b84670dffe445e13ae8249ca4572826b5cc1"
+}

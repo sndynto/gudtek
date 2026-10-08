@@ -24,3 +24,10 @@ quanta-progress.json
 # Operating System Files
 .DS_Store
 Thumbs.db
+
+# Deployment logs (contain contract addresses — safe to commit, but optional)
+# deployments/
+
+# Solidity compiled artifacts (auto-generated)
+artifacts/
+cache/

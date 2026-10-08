@@ -1,0 +1,14 @@
+{
+  "deployedAt": "2026-10-08T08:54:37.971Z",
+  "stack": "solc 0.8.20 + ethers.js 6",
+  "network": "QMS Testnet",
+  "rpc": "https://rpc.testnet.qms.finance",
+  "chainId": 19480,
+  "contractAddress": "0x2adD39aC6B9C5aea98146d4A4c1466BEdA19CfC3",
+  "tokenName": "Marinade",
+  "tokenSymbol": "MNDE",
+  "totalSupply": 1000000000,
+  "deployer": "0xE55d4C0b6f3d34041ac447Ef42eb8C425a714BB3",
+  "explorerUrl": "https://testnet.qmsscan.io/address/0x2adD39aC6B9C5aea98146d4A4c1466BEdA19CfC3",
+  "deployTxHash": "0x4cca6dedcc134ad36f53fc584b448f1f968e8e353e328ae4b61c70674f52a95e"
+}

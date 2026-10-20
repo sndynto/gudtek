@@ -58,8 +58,67 @@ function getWalletProgress(progress, address) {
   return progress[address];
 }
 
+// ─── Relative Time & Activity Scanner ─────────────────────
+function formatTimeAgo(isoStr) {
+  if (!isoStr) return chalk.red("Belum pernah swap");
+  const diffMs = Date.now() - new Date(isoStr).getTime();
+  const diffMins = Math.floor(diffMs / (60 * 1000));
+  const diffHours = Math.floor(diffMs / (3600 * 1000));
+  const diffDays = Math.floor(diffMs / (86400 * 1000));
+
+  if (diffMins < 1) return chalk.green("Baru saja (<1m lalu)");
+  if (diffMins < 60) return chalk.green(`${diffMins} menit lalu`);
+  if (diffHours < 24) return chalk.yellow(`${diffHours} jam lalu`);
+  return chalk.red(`${diffDays} hari lalu`);
+}
+
+async function scanWalletsActivity(walletsList, progress) {
+  process.stdout.write(chalk.cyan("  🔍 Memindai status on-chain 14 wallet di QMSScan Explorer...\r"));
+  const todayUTC = new Date().toISOString().slice(0, 10);
+
+  const results = await Promise.all(
+    walletsList.map(async ({ wallet, label }) => {
+      const addr = wallet.address;
+      let latestSwap = null;
+      let latestLp = null;
+
+      try {
+        const res = await fetch(`https://testnet.qmsscan.io/api/v2/addresses/${addr}/transactions`, {
+          signal: AbortSignal.timeout(6000),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const items = data.items || [];
+          const swap = items.find(tx => tx.method && tx.method.toLowerCase().includes("swap"));
+          const lp = items.find(tx => tx.method && tx.method.toLowerCase().includes("addliquidity"));
+          if (swap) latestSwap = swap.timestamp;
+          if (lp) latestLp = lp.timestamp;
+        }
+      } catch {
+        const p = progress[addr];
+        if (p?.lastSwapTime) latestSwap = p.lastSwapTime;
+        if (p?.lastLpTime) latestLp = p.lastLpTime;
+      }
+
+      const isSwappedToday = latestSwap ? latestSwap.slice(0, 10) === todayUTC : false;
+      const isLpToday = latestLp ? latestLp.slice(0, 10) === todayUTC : false;
+
+      return {
+        address: addr,
+        label,
+        latestSwap,
+        latestLp,
+        isSwappedToday,
+        isLpToday,
+      };
+    })
+  );
+  process.stdout.write(" ".repeat(70) + "\r");
+  return results;
+}
+
 // ─── Startup Banner ───────────────────────────────────────
-function printBanner(progress) {
+function printBanner(progress, activities) {
   console.log(chalk.bold.magenta("\n╔══════════════════════════════════════════════╗"));
   console.log(chalk.bold.magenta("║     QMS QUANTA FARMING ENGINE (ALL TOKENS)   ║"));
   console.log(chalk.bold.magenta("║     1 Set = 1 Swap + 1 Add LP                ║"));
@@ -68,16 +127,38 @@ function printBanner(progress) {
   console.log(chalk.bold.magenta("╚══════════════════════════════════════════════╝\n"));
 
   console.log(chalk.white(`  Network  : ${config.NETWORK_NAME} (Chain ${config.CHAIN_ID})`));
-  console.log(chalk.white(`  Wallets  : ${wallets.length}`));
+  console.log(chalk.white(`  Wallets  : ${wallets.length} active wallet(s)`));
   console.log(chalk.white(`  Set Delay: ${SET_DELAY_MS / 60000} minutes between sets\n`));
 
-  console.log(chalk.bold("  📊 Progress per Wallet:"));
+  console.log(chalk.bold("  📊 Status & Deteksi Swap Hari Ini (Live On-Chain):"));
+  let todayCount = 0;
+  let needTodayCount = 0;
+
   for (const { wallet, label } of wallets) {
     const p = getWalletProgress(progress, wallet.address);
-    const bar = "🟩".repeat(p.completedSets) + "⬜".repeat(MAX_SETS - p.completedSets);
-    console.log(`  ${chalk.cyan(label)} ${bar} ${p.completedSets}/${MAX_SETS} sets`);
+    const act = activities.find(a => a.address.toLowerCase() === wallet.address.toLowerCase());
+    const bar = "🟩".repeat(Math.min(p.completedSets, MAX_SETS)) + "⬜".repeat(Math.max(0, MAX_SETS - p.completedSets));
+
+    let streakStatus = "";
+    if (act?.isSwappedToday) {
+      todayCount++;
+      streakStatus = chalk.green("✔ SUDAH HARI INI");
+    } else {
+      needTodayCount++;
+      streakStatus = chalk.red.bold("✘ BELUM HARI INI");
+    }
+
+    const swapTimeStr = formatTimeAgo(act?.latestSwap);
+    console.log(`  ${chalk.cyan(label.padEnd(20))} ${bar} ${p.completedSets}/${MAX_SETS} | Terakhir: ${swapTimeStr.padEnd(25)} [${streakStatus}]`);
   }
+
   console.log();
+  console.log(`  ℹ  ${chalk.green(todayCount + " wallet sudah swap hari ini")}, ${chalk.yellow(needTodayCount + " wallet BELUM swap hari ini")}`);
+  if (needTodayCount > 0) {
+    console.log(chalk.yellow(`  ⚡ Wallet yang BELUM swap hari ini diprioritaskan dieksekusi lebih dulu!\n`));
+  } else {
+    console.log(chalk.green(`  🎉 Semua wallet sudah melakukan swap hari ini!\n`));
+  }
 }
 
 // ─── Random Token Selection ───────────────────────────────
@@ -145,64 +226,95 @@ async function runOneSet(wallet, label, setNum) {
 // ─── Main Loop ────────────────────────────────────────────
 async function runQuantaEngine() {
   const progress = loadProgress();
-  printBanner(progress);
+  const activities = await scanWalletsActivity(wallets, progress);
+  printBanner(progress, activities);
 
-  const allDone = wallets.every(({ wallet }) => {
+  // Cek apakah ada wallet yang masih butuh set atau belum swap hari ini
+  const allCompletedMax = wallets.every(({ wallet }) => {
     const p = getWalletProgress(progress, wallet.address);
     return p.completedSets >= MAX_SETS;
   });
 
-  if (allDone) {
-    console.log(chalk.green.bold("🎉 All wallets have reached 10/10 sets!\n"));
+  const allSwappedToday = activities.every(a => a.isSwappedToday);
+
+  if (allCompletedMax && allSwappedToday) {
+    console.log(chalk.green.bold("🎉 Semua wallet sudah mencapai 10/10 sets dan sudah swap hari ini!\n"));
     printSummary(progress);
     return;
   }
 
-  let globalSetCount = 0;
-
   while (true) {
     let anyActive = false;
 
-    for (let i = 0; i < wallets.length; i++) {
-      const { wallet, label } = wallets[i];
-      const p = getWalletProgress(progress, wallet.address);
+    // Prioritaskan wallet yang BELUM swap hari ini terlebih dahulu
+    const sortedWallets = [...wallets].sort((a, b) => {
+      const actA = activities.find(x => x.address.toLowerCase() === a.wallet.address.toLowerCase());
+      const actB = activities.find(x => x.address.toLowerCase() === b.wallet.address.toLowerCase());
+      const needA = !actA?.isSwappedToday;
+      const needB = !actB?.isSwappedToday;
+      if (needA && !needB) return -1;
+      if (!needA && needB) return 1;
+      return 0;
+    });
 
-      if (p.completedSets >= MAX_SETS) {
-        console.log(chalk.gray(`  ${label} → Already ${MAX_SETS}/10 sets, skipping.`));
+    for (let i = 0; i < sortedWallets.length; i++) {
+      const { wallet, label } = sortedWallets[i];
+      const p = getWalletProgress(progress, wallet.address);
+      const act = activities.find(x => x.address.toLowerCase() === wallet.address.toLowerCase());
+
+      // Jika sudah 10 sets dan sudah swap hari ini, lewati
+      if (p.completedSets >= MAX_SETS && act?.isSwappedToday) {
+        console.log(chalk.gray(`  ${label} → Sudah 10/10 sets & sudah swap hari ini, skipping.`));
         continue;
       }
 
       anyActive = true;
-      const nextSet = p.completedSets + 1;
+      const nextSet = p.completedSets >= MAX_SETS ? p.completedSets : p.completedSets + 1;
+      
+      if (!act?.isSwappedToday) {
+        console.log(chalk.yellow.bold(`\n  ⚡ [${label}] Memproses set harian (karena belum swap hari ini)...`));
+      }
+
       const ok = await runOneSet(wallet, label, nextSet);
 
       if (ok) {
-        p.completedSets++;
+        if (p.completedSets < MAX_SETS) {
+          p.completedSets++;
+        }
         p.swaps = (p.swaps || 0) + 1;
         p.lps = (p.lps || 0) + 1;
+        p.lastSwapTime = new Date().toISOString();
+        p.lastLpTime = new Date().toISOString();
         progress[wallet.address] = p;
         saveProgress(progress);
-        globalSetCount++;
+
+        if (act) {
+          act.isSwappedToday = true;
+          act.latestSwap = p.lastSwapTime;
+          act.latestLp = p.lastLpTime;
+        }
 
         printProgressBar(p, label);
       }
 
-      if (i < wallets.length - 1) {
+      if (i < sortedWallets.length - 1) {
         await randomSleep(15000, 30000, "  Delay between wallets:");
       }
     }
 
     if (!anyActive) {
-      console.log(chalk.green.bold("\n🎉 ALL WALLETS FINISHED!"));
+      console.log(chalk.green.bold("\n🎉 SEMUA WALLET SUDAH SELESAI!"));
       break;
     }
 
-    const allDoneNow = wallets.every(({ wallet }) => {
-      return (progress[wallet.address]?.completedSets || 0) >= MAX_SETS;
+    const allFinished = sortedWallets.every(({ wallet }) => {
+      const p = progress[wallet.address] || { completedSets: 0 };
+      const act = activities.find(x => x.address.toLowerCase() === wallet.address.toLowerCase());
+      return p.completedSets >= MAX_SETS && act?.isSwappedToday;
     });
 
-    if (allDoneNow) {
-      console.log(chalk.green.bold("\n🎉 ALL WALLETS REACHED 10/10 SETS!"));
+    if (allFinished) {
+      console.log(chalk.green.bold("\n🎉 SEMUA WALLET MENCAPAI 10/10 SETS & SELESAI HARI INI!"));
       break;
     }
 
@@ -224,7 +336,7 @@ async function runQuantaEngine() {
 
 // ─── Visual Progress Bar ──────────────────────────────────
 function printProgressBar(p, label) {
-  const bar = "🟩".repeat(p.completedSets) + "⬜".repeat(MAX_SETS - p.completedSets);
+  const bar = "🟩".repeat(Math.min(p.completedSets, MAX_SETS)) + "⬜".repeat(Math.max(0, MAX_SETS - p.completedSets));
   const quanta = p.completedSets * 10;
   console.log(chalk.bold(`\n  📊 ${label}: ${bar} ${p.completedSets}/${MAX_SETS} sets (~${quanta} Quanta)\n`));
 }
@@ -239,8 +351,8 @@ function printSummary(progress) {
   for (const { wallet, label } of wallets) {
     const p = progress[wallet.address] || { completedSets: 0 };
     const quanta = p.completedSets * 10;
-    const bar = "🟩".repeat(p.completedSets) + "⬜".repeat(MAX_SETS - p.completedSets);
-    console.log(`  ${chalk.cyan(label)}: ${bar} ${p.completedSets}/10 sets → ~${quanta} Quanta`);
+    const bar = "🟩".repeat(Math.min(p.completedSets, MAX_SETS)) + "⬜".repeat(Math.max(0, MAX_SETS - p.completedSets));
+    console.log(`  ${chalk.cyan(label)}: ${bar} ${p.completedSets}/${MAX_SETS} sets → ~${quanta} Quanta`);
     console.log(`    Address: ${wallet.address}`);
     totalSets += p.completedSets;
   }
@@ -272,7 +384,6 @@ function isQuietNetworkError(err) {
 
 process.on("unhandledRejection", (reason) => {
   if (isQuietNetworkError(reason)) {
-    // Quietly ignore transient RPC network drops in background polling
     return;
   }
   console.error(chalk.red("\n[ERROR]"), reason);

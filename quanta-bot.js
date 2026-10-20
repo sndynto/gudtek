@@ -22,6 +22,7 @@ const PRIVATE_KEYS = (process.env.PRIVATE_KEYS || "")
 
 const MAX_SETS     = parseInt(process.env.MAX_SETS || "10");         // Max 10 sets per Discord rules
 const SET_DELAY_MS = parseInt(process.env.SET_DELAY_MS || "900000"); // 15 minutes between sets (900000ms)
+const TODAY_ONLY   = process.argv.includes("--today-only") || process.env.TODAY_ONLY === "true";
 const PROGRESS_FILE = "./quanta-progress.json";
 
 // ─── Validation ───────────────────────────────────────────
@@ -76,43 +77,51 @@ async function scanWalletsActivity(walletsList, progress) {
   process.stdout.write(chalk.cyan("  🔍 Memindai status on-chain 14 wallet di QMSScan Explorer...\r"));
   const todayUTC = new Date().toISOString().slice(0, 10);
 
-  const results = await Promise.all(
-    walletsList.map(async ({ wallet, label }) => {
-      const addr = wallet.address;
-      let latestSwap = null;
-      let latestLp = null;
+  const results = [];
+  for (let i = 0; i < walletsList.length; i += 4) {
+    const chunk = walletsList.slice(i, i + 4);
+    const chunkResults = await Promise.all(
+      chunk.map(async ({ wallet, label }) => {
+        const addr = wallet.address;
+        let latestSwap = null;
+        let latestLp = null;
 
-      try {
-        const res = await fetch(`https://testnet.qmsscan.io/api/v2/addresses/${addr}/transactions`, {
-          signal: AbortSignal.timeout(6000),
-        });
-        if (res.ok) {
-          const data = await res.json();
-          const items = data.items || [];
-          const swap = items.find(tx => tx.method && tx.method.toLowerCase().includes("swap"));
-          const lp = items.find(tx => tx.method && tx.method.toLowerCase().includes("addliquidity"));
-          if (swap) latestSwap = swap.timestamp;
-          if (lp) latestLp = lp.timestamp;
+        try {
+          const res = await fetch(`https://testnet.qmsscan.io/api/v2/addresses/${addr}/transactions`, {
+            signal: AbortSignal.timeout(15000),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            const items = data.items || [];
+            const swap = items.find(tx => tx.method && tx.method.toLowerCase().includes("swap"));
+            const lp = items.find(tx => tx.method && tx.method.toLowerCase().includes("addliquidity"));
+            if (swap) latestSwap = swap.timestamp;
+            if (lp) latestLp = lp.timestamp;
+          }
+        } catch {}
+
+        if (!latestSwap) {
+          const p = progress[addr];
+          if (p?.lastSwapTime) latestSwap = p.lastSwapTime;
+          if (p?.lastLpTime) latestLp = p.lastLpTime;
         }
-      } catch {
-        const p = progress[addr];
-        if (p?.lastSwapTime) latestSwap = p.lastSwapTime;
-        if (p?.lastLpTime) latestLp = p.lastLpTime;
-      }
 
-      const isSwappedToday = latestSwap ? latestSwap.slice(0, 10) === todayUTC : false;
-      const isLpToday = latestLp ? latestLp.slice(0, 10) === todayUTC : false;
+        const isSwappedToday = latestSwap ? latestSwap.slice(0, 10) === todayUTC : false;
+        const isLpToday = latestLp ? latestLp.slice(0, 10) === todayUTC : false;
 
-      return {
-        address: addr,
-        label,
-        latestSwap,
-        latestLp,
-        isSwappedToday,
-        isLpToday,
-      };
-    })
-  );
+        return {
+          address: addr,
+          label,
+          latestSwap,
+          latestLp,
+          isSwappedToday,
+          isLpToday,
+        };
+      })
+    );
+    results.push(...chunkResults);
+  }
+
   process.stdout.write(" ".repeat(70) + "\r");
   return results;
 }
@@ -128,7 +137,11 @@ function printBanner(progress, activities) {
 
   console.log(chalk.white(`  Network  : ${config.NETWORK_NAME} (Chain ${config.CHAIN_ID})`));
   console.log(chalk.white(`  Wallets  : ${wallets.length} active wallet(s)`));
-  console.log(chalk.white(`  Set Delay: ${SET_DELAY_MS / 60000} minutes between sets\n`));
+  console.log(chalk.white(`  Set Delay: ${SET_DELAY_MS / 60000} minutes between sets`));
+  if (TODAY_ONLY) {
+    console.log(chalk.cyan.bold(`  Mode     : 🎯 TODAY-ONLY (Hanya memproses wallet yang belum swap hari ini)`));
+  }
+  console.log();
 
   console.log(chalk.bold("  📊 Status & Deteksi Swap Hari Ini (Live On-Chain):"));
   let todayCount = 0;
@@ -262,6 +275,11 @@ async function runQuantaEngine() {
       const p = getWalletProgress(progress, wallet.address);
       const act = activities.find(x => x.address.toLowerCase() === wallet.address.toLowerCase());
 
+      // Mode TODAY_ONLY: jika sudah swap hari ini, lewati langsung
+      if (TODAY_ONLY && act?.isSwappedToday) {
+        continue;
+      }
+
       // Jika sudah 10 sets dan sudah swap hari ini, lewati
       if (p.completedSets >= MAX_SETS && act?.isSwappedToday) {
         console.log(chalk.gray(`  ${label} → Sudah 10/10 sets & sudah swap hari ini, skipping.`));
@@ -305,6 +323,17 @@ async function runQuantaEngine() {
     if (!anyActive) {
       console.log(chalk.green.bold("\n🎉 SEMUA WALLET SUDAH SELESAI!"));
       break;
+    }
+
+    if (TODAY_ONLY) {
+      const allTodayDone = sortedWallets.every(({ wallet }) => {
+        const act = activities.find(x => x.address.toLowerCase() === wallet.address.toLowerCase());
+        return act?.isSwappedToday;
+      });
+      if (allTodayDone) {
+        console.log(chalk.green.bold("\n🎉 SEMUA WALLET SUDAH BERHASIL SWAP HARI INI!"));
+        break;
+      }
     }
 
     const allFinished = sortedWallets.every(({ wallet }) => {

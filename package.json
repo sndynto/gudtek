@@ -5,6 +5,7 @@
   "scripts": {
     "start": "node bot.js",
     "quanta": "node quanta-bot.js",
+    "quanta:today": "node quanta-bot.js --today-only",
     "deploy-token": "node deploy-token.js"
   },
   "keywords": [],

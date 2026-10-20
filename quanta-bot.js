@@ -253,8 +253,36 @@ function printSummary(progress) {
 }
 
 // ─── Error Handler ────────────────────────────────────────
+function isQuietNetworkError(err) {
+  if (!err) return false;
+  const code = err.code || err.error?.code;
+  const msg = (err.message || String(err)).toLowerCase();
+  return (
+    code === "ECONNRESET" ||
+    code === "ETIMEDOUT" ||
+    code === "ENOTFOUND" ||
+    code === "UND_ERR_CONNECT_TIMEOUT" ||
+    code === "SERVER_ERROR" ||
+    msg.includes("econnreset") ||
+    msg.includes("etimedout") ||
+    msg.includes("socket hang up") ||
+    msg.includes("fetch failed")
+  );
+}
+
 process.on("unhandledRejection", (reason) => {
+  if (isQuietNetworkError(reason)) {
+    // Quietly ignore transient RPC network drops in background polling
+    return;
+  }
   console.error(chalk.red("\n[ERROR]"), reason);
+});
+
+process.on("uncaughtException", (err) => {
+  if (isQuietNetworkError(err)) {
+    return;
+  }
+  console.error(chalk.red("\n[UNCAUGHT ERROR]"), err);
 });
 
 // ─── Start ────────────────────────────────────────────────

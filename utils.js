@@ -83,6 +83,46 @@ function randomPercent(min, max) {
   return Math.random() * (max - min) + min;
 }
 
+// ─── Network Error & Auto-Retry Helpers ───────────────────
+function isNetworkError(err) {
+  if (!err) return false;
+  const code = err.code || err.error?.code || err.info?.error?.code;
+  const msg = (err.message || String(err)).toLowerCase();
+  return (
+    code === "ECONNRESET" ||
+    code === "ETIMEDOUT" ||
+    code === "ENOTFOUND" ||
+    code === "UND_ERR_CONNECT_TIMEOUT" ||
+    code === "SERVER_ERROR" ||
+    msg.includes("econnreset") ||
+    msg.includes("etimedout") ||
+    msg.includes("socket hang up") ||
+    msg.includes("timeout") ||
+    msg.includes("server error") ||
+    msg.includes("bad response") ||
+    msg.includes("failed to fetch") ||
+    msg.includes("could not detect network")
+  );
+}
+
+async function withRetry(fn, maxRetries = 3, delayMs = 3000, label = "") {
+  let attempt = 0;
+  while (true) {
+    try {
+      return await fn();
+    } catch (err) {
+      attempt++;
+      if (attempt >= maxRetries || !isNetworkError(err)) {
+        throw err;
+      }
+      if (label) {
+        log.warn(label, `RPC glitch (${err.code || "network"}), auto-retrying in ${(delayMs / 1000).toFixed(0)}s (${attempt}/${maxRetries})...`);
+      }
+      await sleep(delayMs);
+    }
+  }
+}
+
 module.exports = {
   log,
   sleep,
@@ -95,4 +135,6 @@ module.exports = {
   safeGasLimit,
   randomPick,
   randomPercent,
+  isNetworkError,
+  withRetry,
 };

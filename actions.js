@@ -6,7 +6,8 @@ const { ethers } = require("ethers");
 const config = require("./config");
 const {
   log, randomSleep, formatAmount, explorerTx,
-  ensureApproval, randomPercent, randomPick
+  ensureApproval, randomPercent, randomPick,
+  isNetworkError, sleep
 } = require("./utils");
 
 // ─── Helper: Deadline (20 Minutes) ────────────────────────
@@ -57,29 +58,36 @@ async function unwrapWQMS(wallet, label) {
 
 // ─── 3. SWAP QMS NATIVE → TOKEN ───────────────────────────
 async function swapQMSForToken(wallet, amountWei, tokenOut, tokenSymbol, label) {
-  try {
-    const router = new ethers.Contract(config.ROUTER_ADDRESS, config.ROUTER_ABI, wallet);
-    const path = [config.TOKENS.WQMS, tokenOut];
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const router = new ethers.Contract(config.ROUTER_ADDRESS, config.ROUTER_ABI, wallet);
+      const path = [config.TOKENS.WQMS, tokenOut];
 
-    log.info(label, `Swapping ${formatAmount(amountWei)} QMS → ${tokenSymbol}...`);
+      log.info(label, `Swapping ${formatAmount(amountWei)} QMS → ${tokenSymbol}...`);
 
-    const amounts = await router.getAmountsOut(amountWei, path).catch(() => [amountWei, 0n]);
-    const tokenContract = getToken(wallet, tokenOut);
-    const decimals = await tokenContract.decimals().catch(() => 18);
+      const amounts = await router.getAmountsOut(amountWei, path).catch(() => [amountWei, 0n]);
+      const tokenContract = getToken(wallet, tokenOut);
+      const decimals = await tokenContract.decimals().catch(() => 18);
 
-    const tx = await router.swapExactETHForTokens(
-      0n,
-      path,
-      wallet.address,
-      deadline(),
-      { value: amountWei, gasLimit: 500000n }
-    );
-    const receipt = await tx.wait();
-    log.success(label, `Swap successful! ${formatAmount(amountWei)} QMS → ~${formatAmount(amounts[1] || 0n, Number(decimals))} ${tokenSymbol} | Tx: ${explorerTx(receipt.hash)}`);
-    return true;
-  } catch (e) {
-    log.error(label, `Swap QMS→${tokenSymbol} failed: ${e.reason || e.message}`);
-    return false;
+      const tx = await router.swapExactETHForTokens(
+        0n,
+        path,
+        wallet.address,
+        deadline(),
+        { value: amountWei, gasLimit: 500000n }
+      );
+      const receipt = await tx.wait();
+      log.success(label, `Swap successful! ${formatAmount(amountWei)} QMS → ~${formatAmount(amounts[1] || 0n, Number(decimals))} ${tokenSymbol} | Tx: ${explorerTx(receipt.hash)}`);
+      return true;
+    } catch (e) {
+      if (attempt < 3 && isNetworkError(e)) {
+        log.warn(label, `RPC connection drop on swap (${e.code || "glitch"}), auto-retrying in 3s (${attempt}/3)...`);
+        await sleep(3000);
+        continue;
+      }
+      log.error(label, `Swap QMS→${tokenSymbol} failed: ${e.reason || e.message}`);
+      return false;
+    }
   }
 }
 
@@ -165,44 +173,57 @@ async function swapTokenToToken(wallet, tokenIn, tokenOut, tokenInSymbol, tokenO
 
 // ─── 6. ADD LIQUIDITY (QMS + Token) ──────────────────────
 async function addLiquidityETH(wallet, token, tokenSymbol, ethAmountWei, label) {
-  try {
-    const router = new ethers.Contract(config.ROUTER_ADDRESS, config.ROUTER_ABI, wallet);
-    const tokenContract = getToken(wallet, token);
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const router = new ethers.Contract(config.ROUTER_ADDRESS, config.ROUTER_ABI, wallet);
+      const tokenContract = getToken(wallet, token);
 
-    const tokenBalance = await tokenContract.balanceOf(wallet.address);
-    if (tokenBalance === 0n) {
-      log.warn(label, `No ${tokenSymbol} balance to add liquidity, skipping.`);
+      const tokenBalance = await tokenContract.balanceOf(wallet.address);
+      if (tokenBalance === 0n) {
+        log.warn(label, `No ${tokenSymbol} balance to add liquidity, skipping.`);
+        return false;
+      }
+
+      const amounts = await router.getAmountsOut(ethAmountWei, [config.TOKENS.WQMS, token]).catch(() => null);
+      if (!amounts) {
+        if (attempt < 3) {
+          await sleep(2000);
+          continue;
+        }
+        return false;
+      }
+
+      const tokenAmountDesired = amounts[1];
+      const tokenAmount = tokenAmountDesired > tokenBalance ? tokenBalance : tokenAmountDesired;
+
+      if (tokenAmount === 0n) return false;
+
+      const decimals = await tokenContract.decimals().catch(() => 18);
+      log.info(label, `Adding Liquidity: ${formatAmount(ethAmountWei)} QMS + ${formatAmount(tokenAmount, Number(decimals))} ${tokenSymbol}...`);
+
+      await ensureApproval(wallet, tokenContract, config.ROUTER_ADDRESS, tokenAmount, tokenSymbol, label);
+
+      const tx = await router.addLiquidityETH(
+        token,
+        tokenAmount,
+        0n,
+        0n,
+        wallet.address,
+        deadline(),
+        { value: ethAmountWei, gasLimit: 500000n }
+      );
+      const receipt = await tx.wait();
+      log.success(label, `Add Liquidity successful! QMS + ${tokenSymbol} | Tx: ${explorerTx(receipt.hash)}`);
+      return true;
+    } catch (e) {
+      if (attempt < 3 && isNetworkError(e)) {
+        log.warn(label, `RPC connection drop on addLiquidity (${e.code || "glitch"}), auto-retrying in 3s (${attempt}/3)...`);
+        await sleep(3000);
+        continue;
+      }
+      log.error(label, `Add Liquidity failed: ${e.reason || e.message}`);
       return false;
     }
-
-    const amounts = await router.getAmountsOut(ethAmountWei, [config.TOKENS.WQMS, token]).catch(() => null);
-    if (!amounts) return false;
-
-    const tokenAmountDesired = amounts[1];
-    const tokenAmount = tokenAmountDesired > tokenBalance ? tokenBalance : tokenAmountDesired;
-
-    if (tokenAmount === 0n) return false;
-
-    const decimals = await tokenContract.decimals().catch(() => 18);
-    log.info(label, `Adding Liquidity: ${formatAmount(ethAmountWei)} QMS + ${formatAmount(tokenAmount, Number(decimals))} ${tokenSymbol}...`);
-
-    await ensureApproval(wallet, tokenContract, config.ROUTER_ADDRESS, tokenAmount, tokenSymbol, label);
-
-    const tx = await router.addLiquidityETH(
-      token,
-      tokenAmount,
-      0n,
-      0n,
-      wallet.address,
-      deadline(),
-      { value: ethAmountWei, gasLimit: 500000n }
-    );
-    const receipt = await tx.wait();
-    log.success(label, `Add Liquidity successful! QMS + ${tokenSymbol} | Tx: ${explorerTx(receipt.hash)}`);
-    return true;
-  } catch (e) {
-    log.error(label, `Add Liquidity failed: ${e.reason || e.message}`);
-    return false;
   }
 }
 
